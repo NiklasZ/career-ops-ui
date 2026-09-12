@@ -62,15 +62,128 @@ function loadPortals() {
   return yaml.load(readFileSync(PATHS.portals, 'utf8')) || {};
 }
 
-function loadSeenUrls() {
+// ── Scan-history recheck policy (v1.214.0) ────────────────────────────────
+// Mirrors the parent CLI scan.mjs: `scan_history.recheck_after_days` in
+// portals.yml lets previously-`added` URLs become eligible again once they are
+// OLDER than the window (companies re-post the same JD; a 180-day window
+// re-surfaces those without re-offering last week's intake). Previously the UI
+// scanner, unlike the CLI, deduped scan-history rows forever.
+//
+// Statuses that can never come back (this set is the CLI's PERMANENT list):
+const PERMANENT_SCAN_HISTORY_STATUSES = new Set([
+  'skipped_invalid_url',
+  'skipped_blocked_host',
+]);
+
+// Both ages are ISO calendar days; plain-day math on UTC midnight keeps the
+// window stable regardless of DST/locale (same as CLI daysBetweenIsoDates).
+function daysBetweenIsoDates(start, end) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return null;
+  const startDate = new Date(`${start}T00:00:00Z`);
+  const endDate = new Date(`${end}T00:00:00Z`);
+  if (startDate.toISOString().slice(0, 10) !== start || endDate.toISOString().slice(0, 10) !== end) return null;
+  return Math.floor((endDate - startDate) / (1000 * 60 * 60 * 24));
+}
+
+// LOCAL calendar day (not UTC) — the window gate must not open a day early for
+// west-of-Greenwich evening runs (see CLI localToday, #3070).
+function localDay(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+// Mirror of CLI scan.mjs shouldDedupScanHistoryRow. `recheckAfterDays: null`
+// (config absent) keeps the historical behavior: everything dedups forever.
+export function shouldDedupScanHistoryRow({ firstSeen, status = 'added' }, { recheckAfterDays = null, today = localDay() } = {}) {
+  if (PERMANENT_SCAN_HISTORY_STATUSES.has(status)) return true;
+  if (status.startsWith('cooldown:')) {
+    const cooldownUntil = status.split(':').slice(-1)[0];
+    return today < cooldownUntil;
+  }
+  if (status !== 'added') return true;
+  if (recheckAfterDays == null) return true;
+  const ageDays = daysBetweenIsoDates(firstSeen, today);
+  if (ageDays == null) return true;
+  return ageDays < recheckAfterDays;
+}
+
+export function scanHistoryConfig(portals = {}) {
+  const raw = portals.scan_history?.recheck_after_days;
+  const parsed = Number.parseInt(raw, 10);
+  return { recheckAfterDays: Number.isFinite(parsed) && parsed >= 0 ? parsed : null };
+}
+
+/**
+ * Yield { url, firstSeen, status } for every dedup-relevant row in
+ * scan-history.tsv, tolerating both column orders the file is written in:
+ *   - UI scanners (this file + ru-scanner.mjs): first_seen<TAB>portal<TAB>id<TAB>company<TAB>title<TAB>url
+ *   - CLI scan.mjs (formatScanHistoryRow):      url<TAB>first_seen<TAB>portal<TAB>title<TAB>company<TAB>status<TAB>location<TAB>…
+ * A line whose date cannot be read still counts as seen (unknown age → dedup
+ * forever), preserving the pre-recheck behavior for foreign rows.
+ */
+export function* scanHistoryRows(text) {
+  const lines = String(text ?? '').split('\n');
+  const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    if (i === 0 && line.startsWith('url\tfirst_seen')) continue; // CLI file header
+    const cells = line.split('\t');
+    let url = '';
+    let firstSeen = '';
+    let status = 'added';
+    if (isIsoDate(cells[0])) {
+      // UI format — date in col 0, the job URL is the last col.
+      url = cells[cells.length - 1] || '';
+      firstSeen = cells[0];
+    } else if (/^https?:\/\//.test(cells[0])) {
+      // CLI format — URL col 0, date col 1, status col 5.
+      url = cells[0];
+      firstSeen = isIsoDate(cells[1]) ? cells[1] : '';
+      status = cells[5] || 'added';
+    } else {
+      const m = line.match(/https?:\/\/\S+/);
+      if (!m) continue;
+      url = m[0]; // unparseable row — conservative: stays seen
+    }
+    if (!/^https?:\/\//.test(url)) continue;
+    yield { url, firstSeen, status };
+  }
+}
+
+/**
+ * Build the seen-URL set for one scan. By default every scan-history URL is
+ * seen forever; with `scan_history.recheck_after_days` set, rows older than the
+ * window (status `added`, non-permanent) drop out of `seen` so the URL is
+ * offered as new again. pipeline.md and applications.md are always seen.
+ */
+function loadSeenUrls({ recheckAfterDays = null } = {}) {
   const seen = new Set();
-  for (const p of [PATHS.scanHistory, PATHS.pipeline, PATHS.applications]) {
+  let recheckEligible = 0;
+  const today = localDay();
+
+  try {
+    const text = readFileSync(PATHS.scanHistory, 'utf8');
+    for (const row of scanHistoryRows(text)) {
+      if (shouldDedupScanHistoryRow(row, { recheckAfterDays, today })) {
+        seen.add(normalizeUrl(row.url) || row.url);
+      } else {
+        recheckEligible++;
+      }
+    }
+  } catch {}
+
+  // pipeline.md + applications.md — always counted as seen (pending / in-flight).
+  for (const p of [PATHS.pipeline, PATHS.applications]) {
     try {
       const text = readFileSync(p, 'utf8');
       for (const m of text.matchAll(/https?:\/\/\S+/g)) seen.add(normalizeUrl(m[0]) || m[0]);
     } catch {}
   }
-  return seen;
+
+  return { seen, recheckEligible };
 }
 
 async function pMap(items, mapper, concurrency) {
@@ -126,7 +239,8 @@ export async function runEnScan(opts = {}) {
   // postings — it NEVER drops a job.
   const trust = buildTrustValidator(portals.trust_filter);
   const trustOn = !!(portals.trust_filter && portals.trust_filter.enabled !== false);
-  const seen = loadSeenUrls();
+  const historyCfg = scanHistoryConfig(portals);
+  const { seen, recheckEligible } = loadSeenUrls(historyCfg);
 
   let companies = portals.tracked_companies || portals.companies || [];
   companies = companies.filter((c) => c.enabled !== false);
@@ -154,7 +268,12 @@ export async function runEnScan(opts = {}) {
   log('stdout', `With API:             ${withApi.length}`);
   log('stdout', `Without API (skipped):${skipped}`);
   if (quarantinedCount) log('stdout', `Quarantined (skipped):${quarantinedCount} (dead 404/410 — auto-retried after ${RETRY_AFTER_DAYS} days)`);
-  log('stdout', `Already seen:         ${seen.size} URLs`);
+  const recheckNote = historyCfg.recheckAfterDays == null
+    ? ''
+    : (recheckEligible
+      ? ` (${recheckEligible} older than ${historyCfg.recheckAfterDays}d — will be re-offered)`
+      : ` (dedup window: ${historyCfg.recheckAfterDays}d)`);
+  log('stdout', `Already seen:         ${seen.size} URLs${recheckNote}`);
   log('stdout', '');
 
   const errors = [];
@@ -210,7 +329,7 @@ export async function runEnScan(opts = {}) {
   // a row is ranked higher.
   const filtered = allRaw
     .filter((j) => titleOk(j.title)
-      && locOk(j.location)
+      && locOk(j.location, j.url, j.title)
       && tierOk(j.title)
       && contentOk(j.description ?? j.snippet))
     .map((j) => {

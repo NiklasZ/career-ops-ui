@@ -125,6 +125,29 @@ window.ScanResults = (function () {
     }
     if (prev && [...ctx.filterSeniority.options].some((o) => o.value === prev)) ctx.filterSeniority.value = prev;
   }
+  // v1.160.0+ — repaint the Location-eligible select with live per-bucket counts
+  // so "why is nothing marked not eligible / unsure" is answerable at a glance.
+  function paintEligibleOptions(rows) {
+    if (!ctx.filterEligible) return;
+    const prev = ctx.filterEligible.value;
+    const counts = { yes: 0, no: 0, unsure: 0, unchecked: 0 };
+    for (const r of rows || []) {
+      if (r && r.el && counts[r.el.v] !== undefined) counts[r.el.v] += 1;
+      else counts.unchecked += 1;
+    }
+    const options = [
+      ['', t('scan.elAll', 'All results'), rows.length],
+      ['yes', t('scan.elYes', 'Eligible'), counts.yes],
+      ['no', t('scan.elNo', 'Not eligible'), counts.no],
+      ['unsure', t('scan.elUnsure', 'Unsure'), counts.unsure],
+      ['unchecked', t('scan.elUnchecked', 'Not yet checked'), counts.unchecked],
+    ];
+    while (ctx.filterEligible.children.length) ctx.filterEligible.removeChild(ctx.filterEligible.lastChild);
+    for (const [val, label, n] of options) {
+      ctx.filterEligible.appendChild(c('option', { value: val }, `${label} (${n})`));
+    }
+    if (prev && [...ctx.filterEligible.options].some((o) => o.value === prev)) ctx.filterEligible.value = prev;
+  }
   function getRows() {
     const scope = ctx.filterScope.value || 'all';
     const en = ctx.getLastResults().en;
@@ -140,6 +163,7 @@ window.ScanResults = (function () {
     // it lists exactly the countries present, each with a count.
     paintCountryOptions(allRows);
     paintSeniorityOptions(allRows);
+    paintEligibleOptions(allRows);
     const enWhen = ctx.getLastResults().en?.when ? new Date(ctx.getLastResults().en.when).toLocaleString('ru') : null;
     const ruWhen = ctx.getLastResults().ru?.when ? new Date(ctx.getLastResults().ru.when).toLocaleString('ru') : null;
 
@@ -193,6 +217,7 @@ window.ScanResults = (function () {
     const fr = ctx.filterRemote.value;
     const fs = ctx.filterSource.value;
     const fc = ctx.filterCountry.value; // v1.78.0 — country code or '' (all)
+    const fel = ctx.filterEligible ? ctx.filterEligible.value : ''; // v1.160.0+ — location eligibility verdict (r.el.v) or '' (all)
     const fsen = ctx.filterSeniority.value; // v1.129.0 — seniority bucket or '' (all)
     const fa = parseInt(ctx.filterAge.value, 10); // v1.80.0 — max age in days (NaN = any)
     const ageCutoff = Number.isFinite(fa) && fa > 0 ? Date.now() - fa * 86400000 : null;
@@ -210,6 +235,13 @@ window.ScanResults = (function () {
       if (fr === 'reloc' && !r.relocates) return false;
       if (fs && r.source !== fs) return false;
       if (fc && !window.Countries.rowInCountry(r, fc)) return false;
+      // v1.160.0+ — location-eligibility verdicts (`r.el` stamped by the
+      // server from data/eligibility.json). Untagged rows only pass the
+      // "Not yet checked" bucket; the verdict buckets never guess.
+      if (fel === 'yes' && !(r.el && r.el.v === 'yes')) return false;
+      if (fel === 'no' && !(r.el && r.el.v === 'no')) return false;
+      if (fel === 'unsure' && !(r.el && r.el.v === 'unsure')) return false;
+      if (fel === 'unchecked' && r.el) return false;
       // v1.129.0 — seniority: keep only the selected bucket; titles with no
       // seniority word (bucket null) always pass, like the other facets.
       if (fsen && senOf(r) !== fsen) return false;
@@ -326,12 +358,20 @@ window.ScanResults = (function () {
         style: { fontSize: '13px', color: 'var(--foggy)', whiteSpace: 'nowrap' },
         title: r.date || '',
       }, freshText);
+      // v1.160.0+ — ✓/✗/? badge for the location-eligibility verdict; tooltip
+      // shows the verbatim evidence line from the LLM judge (or the auto rule).
+      const elBadge = r.el ? c('span', {
+        className: 'badge ' + (r.el.v === 'yes' ? 'badge-ok' : r.el.v === 'no' ? 'badge-bad' : 'badge-warn'),
+        title: [r.el.e, r.el.r].filter(Boolean).join(' · '),
+        style: { marginRight: '6px', fontSize: '11px' },
+        'aria-label': r.el.v,
+      }, r.el.v === 'yes' ? '✓' : r.el.v === 'no' ? '✗' : '?') : null;
       return c('tr', null, [
         starCell,
         companyCell,
         titleCell,
         senCell,
-        c('td', { style: { fontSize: '13px', color: 'var(--foggy)' } }, r.location || '—'),
+        c('td', { style: { fontSize: '13px', color: 'var(--foggy)' } }, elBadge ? [elBadge, r.location || '—'] : (r.location || '—')),
         c('td', null, c('span', { className: 'badge ' + wtClass }, wt)),
         c('td', null, r.relocates ? c('span', { className: 'badge badge-info' }, t('scan.relocBadge', 'reloc')) : ''),
         c('td', { style: { fontSize: '13px', color: 'var(--foggy)' } }, r.salary || ''),

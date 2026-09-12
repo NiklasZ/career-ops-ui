@@ -22,6 +22,17 @@ import { getLastWorkdayFallback } from '../sources/workday.mjs';
 import { SOURCES } from '../sources/registry.mjs';
 import { PATHS } from '../paths.mjs';
 import { detectRepostsFromFile, DEFAULT_WINDOW_DAYS } from '../detect-reposts.mjs';
+import {
+  refineEligibility,
+  attachEligibility,
+  baseCountry,
+  loadEligibilityCache,
+  loadEligibilityRun,
+  eligibilityStats,
+  ELIGIBILITY_LABEL,
+  ELIGIBILITY_CRITERIA,
+} from '../location-eligibility.mjs';
+import { llmRateLimit } from '../rate-limit.mjs';
 
 /**
  * Open an SSE response with the standard headers used across this repo.
@@ -154,8 +165,59 @@ export function registerScanRoutes(app) {
     // Only the snapshot, not history — the scanner resets it on each
     // successful Workday fetch.
     res.json({
-      ...loadLastScan(),
+      ...attachEligibility(loadLastScan()),
       workdayFallback: getLastWorkdayFallback(),
     });
+  });
+
+  // ─── Location-eligibility refine (#/scan) ───
+  // The judge's criteria + current cache stats, read-only — the SPA shows them
+  // in the "ⓘ" popover next to the "Location eligible" filter.
+  app.get('/api/scan/eligibility', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({
+      label: ELIGIBILITY_LABEL,
+      criteria: ELIGIBILITY_CRITERIA,
+      baseCountry: baseCountry(),
+      stats: eligibilityStats(loadEligibilityCache()),
+      lastRun: loadEligibilityRun(),
+    });
+  });
+
+  // ─── Location-eligibility refine (#/scan) — SSE stream (GET, mirrors
+  //     /api/stream/scan so the SPA reuses its EventSource/progress pattern).
+  //     Events: start → (log | progress)* → done. run=false preview is gone:
+  //     always live; a missing LLM provider streams `done.mode: manual` with a
+  //     copy-paste prompt instead of a fabricated verdict.
+  app.get('/api/scan/eligibility/refine', llmRateLimit, async (req, res) => {
+    const send = openSse(res);
+    const ctrl = new AbortController();
+    let closed = false;
+    res.on('close', () => { closed = true; ctrl.abort(); });
+    const emit = (event, data) => { if (!closed) send(event, data); };
+    let rows = [];
+    try {
+      const snap = loadLastScan();
+      rows = [...((snap.en && snap.en.filtered) || []), ...((snap.ru && snap.ru.filtered) || [])];
+    } catch { rows = []; }
+    emit('start', { totalRows: rows.length });
+    const result = await refineEligibility(rows, {
+      onLog: (line) => emit('log', { line }),
+      onProgress: (done, total) => emit('progress', { done, total }),
+      signal: ctrl.signal,
+    });
+    emit('done', {
+      ok: !result.error,
+      error: result.error || null,
+      mode: result.error ? 'error' : (result.manualPrompt ? 'manual' : 'ok'),
+      prompt: result.manualPrompt || null,
+      autoTagged: result.autoTagged.length,
+      llmTagged: result.llm.length,
+      pendingRemaining: result.pending,
+      llmCalls: result.calls,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+    });
+    if (!res.writableEnded) res.end();
   });
 }

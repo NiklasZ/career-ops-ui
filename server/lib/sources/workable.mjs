@@ -38,6 +38,17 @@
  * whose only purpose is to fall through to that feed, does not apply here.)
  */
 import { fetchJsonWithRetry, BROWSER_LIKE_USER_AGENT } from '../http-json.mjs';
+import { decodeEntities } from '../html-entities.mjs';
+
+// Workable's widget payload embeds each posting body as `description` (HTML);
+// map it to `description` so the eligibility judge reads the real JD.
+const DESCRIPTION_CAP = 20000;
+
+function bodyToText(html) {
+  if (typeof html !== 'string' || !html) return '';
+  return decodeEntities(html.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ').trim().slice(0, DESCRIPTION_CAP);
+}
 
 // Browser-like request headers. apply.workable.com sits behind Cloudflare, which
 // can block a generic UA outright; the shared BROWSER_LIKE_USER_AGENT keeps every
@@ -238,6 +249,7 @@ function normalize(j, url) {
     relocates: /\b(visa|relocation|sponsorship)\b/i.test((j.description || '') + ' ' + (j.title || '')),
     date: j.published_on || j.created_at || '',
     snippet: '',
+    description: bodyToText(j.description),
     source: 'workable',
   };
 }

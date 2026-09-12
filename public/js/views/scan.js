@@ -17,6 +17,11 @@ function __cancelActiveScanPoll() {
     clearTimeout(__activeScanDoneTimeout);
     __activeScanDoneTimeout = null;
   }
+  // v1.160.0+ — a live eligibility-refine stream must not outlive the view.
+  if (window.__eligibilityStream) {
+    window.__eligibilityStream.close();
+    window.__eligibilityStream = null;
+  }
 }
 // Cancel on every route change — the renderer always begins from a clean slate.
 window.addEventListener('hashchange', __cancelActiveScanPoll);
@@ -173,6 +178,133 @@ Router.register('scan', async () => {
   ]);
   // v1.80.0 — ⭐ favorites-only toggle (localStorage-backed, by job URL).
   const favOnly = c('input', { type: 'checkbox', id: 'fav-only' });
+  // v1.160.0+ — Location-eligibility filter + LLM refine pass (#/scan). The
+  // select filters on the per-URL verdicts (`r.el`) the server attaches to
+  // /api/scan-results; the Refine button runs the LLM judge over the ambiguous
+  // band of the last scan and caches verdicts per URL (never removes rows).
+  const filterEligible = c('select', { className: 'select', id: 'scan-filter-eligible' }, [
+    c('option', { value: '' }, t('scan.elAll', 'All results')),
+    c('option', { value: 'yes' }, t('scan.elYes', 'Eligible')),
+    c('option', { value: 'no' }, t('scan.elNo', 'Not eligible')),
+    c('option', { value: 'unsure' }, t('scan.elUnsure', 'Unsure')),
+    c('option', { value: 'unchecked' }, t('scan.elUnchecked', 'Not yet checked')),
+  ]);
+  const elHelpBox = c('div', {
+    className: 'eligibility-help',
+    hidden: true,
+    style: {
+      background: 'rgba(127,127,127,.08)', border: '1px solid var(--line, rgba(127,127,127,.25))',
+      borderRadius: '6px', padding: '10px 12px', marginTop: '8px', fontSize: '13px',
+    },
+  });
+  let elHelpLoaded = false;
+  const elInfoBtn = c('button', {
+    type: 'button', className: 'btn btn-ghost btn-sm',
+    'aria-label': t('scan.elHelp', 'Location eligibility'),
+    title: t('scan.elHelp', 'Location eligibility'),
+    onClick: async () => {
+      elHelpBox.hidden = !elHelpBox.hidden;
+      if (!elHelpBox.hidden && !elHelpLoaded) {
+        elHelpLoaded = true;
+        elHelpBox.textContent = t('common.loading', 'Loading…');
+        try {
+          const d = await API.get('/api/scan/eligibility');
+          elHelpBox.textContent = '';
+          elHelpBox.appendChild(c('p', { className: 'muted' }, t('scan.elHelpIntro',
+            'A role is Location eligible when it can be performed from your base country — judged from the job text, never from the location string alone.')));
+          if (d && Array.isArray(d.criteria) && d.criteria.length) {
+            const ul = c('ul', { style: { margin: '8px 0 0', paddingLeft: '18px', color: 'var(--foggy)' } });
+            for (const rule of d.criteria) ul.appendChild(c('li', { style: { margin: '4px 0' } }, rule));
+            elHelpBox.appendChild(ul);
+          }
+          if (d && d.baseCountry) elHelpBox.appendChild(c('p', { className: 'muted', style: { marginTop: '8px' } }, '📍 ' + d.baseCountry));
+        } catch {
+          elHelpBox.textContent = t('common.error', 'Error');
+        }
+      }
+    },
+  }, 'ⓘ');
+  // Determinate progress bar for the refine stream (reuses .scan-progress
+  // styling; independent of the scan-run bar so both can coexist).
+  const refineProgressBar = c('div', { className: 'scan-progress__bar' });
+  const refineProgress = c('div', {
+    className: 'scan-progress', id: 'scan-refine-progress',
+    role: 'progressbar', 'aria-label': t('scan.elRefining', 'Refining…'),
+    'aria-valuemin': '0', 'aria-valuemax': '100',
+  }, [refineProgressBar]);
+  const refineProgressLabel = c('span', { className: 'scan-progress-label', 'aria-hidden': 'true' }, '');
+  const refineProgressWrap = c('div', { className: 'scan-progress-wrap', style: { marginBottom: '8px' } }, [refineProgressLabel, refineProgress]);
+  refineProgressWrap.hidden = true;
+  const refineBtn = c('button', {
+    type: 'button', className: 'btn btn-ghost', id: 'scan-refine-eligibility',
+    onClick: () => {
+      // One stream at a time; the SSE `done` event owns the teardown.
+      if (window.__eligibilityStream) return;
+      const consoleNode = consoleEl;
+      refineBtn.disabled = true;
+      refineBtn.setAttribute('aria-busy', 'true');
+      refineBtn.textContent = '⏳ ' + t('scan.elRefining', 'Refining…');
+      refineProgressWrap.hidden = false;
+      refineProgressLabel.textContent = t('scan.elRefining', 'Refining…');
+      refineProgress.classList.remove('is-determinate');
+      refineProgressBar.style.width = '';
+      refineProgress.removeAttribute('aria-valuenow');
+      const setBar = (done, total) => {
+        const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+        refineProgress.classList.add('is-determinate');
+        refineProgressBar.style.width = pct + '%';
+        refineProgress.setAttribute('aria-valuenow', String(pct));
+        refineProgressLabel.textContent = t('scan.elRefining', 'Refining…') + ' ' + pct + '%';
+      };
+      const done = (summary) => {
+        const s = summary || {};
+        if (s.prompt) {
+          consoleNode.textContent = String(s.prompt);
+          UI.toast(t('scan.elManual', 'No LLM provider configured — eligibility prompt copied to the scan console.'), 'info');
+        } else if (s.error) {
+          UI.toast(t('scan.elError', 'Location eligibility refine failed.') + ' ' + String(s.error), 'error');
+        } else {
+          const fresh = (Number(s.autoTagged) || 0) + (Number(s.llmTagged) || 0);
+          UI.toast(t('scan.elDone', 'Location eligibility refined: ') + fresh + ' (' + (Number(s.llmCalls) || 0) + ' ' + t('scan.elCalls', 'LLM calls') + ')', 'success');
+          if (s.pendingRemaining) consoleNode.textContent += (consoleNode.textContent ? '\n' : '') + `${s.pendingRemaining} rows left unmarked`;
+        }
+        refineBtn.disabled = false;
+        refineBtn.removeAttribute('aria-busy');
+        refineBtn.textContent = '⚡ ' + t('scan.elRefine', 'Refine eligibility');
+        refineProgressWrap.hidden = true;
+        refreshResults();
+      };
+      const es = new EventSource('/api/scan/eligibility/refine');
+      window.__eligibilityStream = es;
+      es.addEventListener('progress', (ev) => {
+        try { const d = JSON.parse(ev.data); setBar(d.done || 0, d.total || 0); } catch {}
+      });
+      es.addEventListener('log', (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d && d.line) consoleNode.textContent += (consoleNode.textContent ? '\n' : '') + d.line;
+        } catch {}
+      });
+      let doneReceived = false;
+      es.addEventListener('done', (ev) => {
+        doneReceived = true;
+        let d = null;
+        try { d = JSON.parse(ev.data); } catch {}
+        if (window.__eligibilityStream === es) window.__eligibilityStream = null;
+        es.close();
+        done(d);
+      });
+      // Close on the first error — NO auto-reconnect. A reconnect would spawn a
+      // second concurrent refine run (the GET is live, not idempotent), which
+      // doubles LLM spend. The server aborts the dropped run via res close.
+      es.onerror = () => {
+        if (doneReceived) return;
+        if (window.__eligibilityStream === es) window.__eligibilityStream = null;
+        es.close();
+        UI.toast(t('scan.elError', 'Location eligibility refine failed.'), 'error');
+      };
+    },
+  }, '⚡ ' + t('scan.elRefine', 'Refine eligibility'));
 
   const companySelect = c('select', { className: 'select', id: 'company-select' }, [
     c('option', { value: '' }, t('scan.allCompanies')),
@@ -242,6 +374,7 @@ Router.register('scan', async () => {
     resultsEl, t,
     filterScope, filterText, filterExclude, filterRemote, filterSource,
     filterCountry, filterSeniority, filterAge, favOnly, filterSalaryMin, filterSalaryMax,
+    filterEligible,
     activeTech, activeLevel, activeDynamic, pager, twoPagerData,
     getLastResults: () => lastResults,
   });
@@ -264,6 +397,7 @@ Router.register('scan', async () => {
     {
       filterText, filterExclude, filterRemote, filterSalaryMin, filterSalaryMax,
       filterSource, filterCountry, filterSeniority, filterScope, filterAge, favOnly,
+      filterEligible,
       activeTech, activeLevel, activeDynamic,
     },
     { pager, SR },
@@ -272,7 +406,7 @@ Router.register('scan', async () => {
   ;[filterText, filterExclude, filterSalaryMin, filterSalaryMax].forEach((el) =>
     el.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applyFilters(); } }));
   // Selects/checkboxes feel broken if they need a second click, so they apply on change.
-  ;[filterRemote, filterSource, filterCountry, filterSeniority, filterScope, filterAge, favOnly].forEach((el) =>
+  ;[filterRemote, filterSource, filterCountry, filterSeniority, filterScope, filterAge, favOnly, filterEligible].forEach((el) =>
     el.addEventListener('change', applyFilters));
 
   // v1.80.0 — saved-searches bar (localStorage via window.ScanPrefs).
@@ -405,7 +539,7 @@ Router.register('scan', async () => {
       ]),
     ]),
 
-    c('div', null, [errBanner, scanProgressWrap, statusRegion, consoleEl]),
+    c('div', null, [errBanner, scanProgressWrap, refineProgressWrap, statusRegion, consoleEl]),
 
     repostsPanel,
 
@@ -424,6 +558,10 @@ Router.register('scan', async () => {
         field(t('scan.salaryTo', 'Salary to'), filterSalaryMax),
         field(t('scan.lblSource', 'Source'), filterSource),
         field(t('scan.lblCountry', 'Country'), filterCountry),
+        c('label', { className: 'field scan-field', htmlFor: 'scan-filter-eligible' }, [
+          c('span', { className: 'scan-field__label' }, t('scan.elLabel', 'Location eligible')),
+          c('span', { className: 'flex', style: { gap: '6px', alignItems: 'center', height: '38px' } }, [filterEligible, elInfoBtn]),
+        ]),
         field(t('scan.lblSeniority', 'Seniority'), filterSeniority),
         field(t('scan.lblAge', 'Posted within'), filterAge),
         field(t('scan.lblScope', 'Scope'), filterScope),
@@ -435,10 +573,11 @@ Router.register('scan', async () => {
         // v1.148.0 — actions are a full-width, right-aligned row (styled by
         // .scan-filters__actions); the old hidden-label alignment hack + inner
         // flex wrapper are no longer needed.
-        c('div', { className: 'scan-filters__actions' }, [applyBtn, resetBtn]),
+        c('div', { className: 'scan-filters__actions' }, [refineBtn, applyBtn, resetBtn]),
       ]),
       c('p', { className: 'field-hint scan-filters__hint' }, t('scan.filtersHint',
         'Fill any boxes and press Apply. Salary from/to keeps only jobs whose pay overlaps your range — jobs with no listed salary are hidden once you set a salary. Amounts are compared as plain numbers (currency is ignored).')),
+      elHelpBox,
       resultsEl,
     ]),
 

@@ -26,13 +26,17 @@ const envKey = (k) => effectiveEnv(k, PATHS.envFile);
 /**
  * @returns {{ markdown: string, usage: object|null, error: string|null }}
  */
+// Safety rail only (see openai.mjs): callers set an explicit output budget via
+// `opts.maxTokens`; this just bounds it.
+const MAX_OUTPUT_TOKENS_CEILING = 200000;
+
 export async function runAnthropic(prompt, opts = {}) {
   const apiKey = opts.apiKey || envKey('ANTHROPIC_API_KEY');
   if (!apiKey) {
     return { markdown: '', usage: null, error: 'ANTHROPIC_API_KEY not set' };
   }
   const model = opts.model || envKey('ANTHROPIC_MODEL') || 'claude-sonnet-4-6';
-  const maxTokens = Math.min(Math.max(opts.maxTokens || 8192, 256), 16384);
+  const maxTokens = Math.min(Math.max(opts.maxTokens || 8192, 256), MAX_OUTPUT_TOKENS_CEILING);
   const timeoutMs = opts.timeoutMs || 180_000;
   const fetchImpl = opts.fetchImpl || fetch;
 

@@ -77,8 +77,9 @@ export function buildOfficeMap(json) {
 // text-level entities (`&amp;`, `&#39;`) only become decodable once the tags
 // are stripped. Plain text is what the content_filter matches against —
 // substring matching over raw HTML misses keywords split by a tag. Capped to
-// keep scan payloads sane (a 10 KB/posting body is normal for Greenhouse).
-const DESCRIPTION_CAP = 4000;
+// keep scan payloads sane; the cap is generous enough that the eligibility
+// judge gets the full posting body (it trims to its own 20k budget).
+const DESCRIPTION_CAP = 20000;
 
 /** Entity-decoded markup → stripped plain text. Exported for tests. */
 export function contentToText(content) {

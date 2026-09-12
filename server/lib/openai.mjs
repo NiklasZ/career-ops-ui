@@ -32,6 +32,12 @@ export const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
 
 const envKey = (k) => effectiveEnv(k, PATHS.envFile);
 
+// Output-token ceiling. Historically a hard 16384; OpenAI-compatible routes
+// (LiteLLM proxies, self-hosted servers) can offer far larger budgets — the
+// user's route allows 384k. This is a safety rail, not a policy: callers opt
+// into a bigger budget via `opts.maxTokens` (the eligibility judge asks 40k).
+const MAX_OUTPUT_TOKENS_CEILING = 200000;
+
 /**
  * @returns {{ markdown: string, usage: object|null, error: string|null }}
  */
@@ -40,7 +46,7 @@ export async function runOpenAICompatible(prompt, opts = {}) {
   if (!apiKey) {
     return { markdown: '', usage: null, error: `${label} key not set` };
   }
-  const maxTokens = Math.min(Math.max(opts.maxTokens || 8192, 256), 16384);
+  const maxTokens = Math.min(Math.max(opts.maxTokens || 8192, 256), MAX_OUTPUT_TOKENS_CEILING);
   const timeoutMs = opts.timeoutMs || 180_000;
   const fetchImpl = opts.fetchImpl || fetch;
 
@@ -59,6 +65,11 @@ export async function runOpenAICompatible(prompt, opts = {}) {
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
+        // Provider-specific extras (e.g. a reasoning/thinking toggle) first, so
+        // they can never clobber the core request fields below. Off by default:
+        // a route that rejects an unknown param answers 400, so the caller must
+        // opt in via `opts.extraBody`.
+        ...(opts.extraBody && typeof opts.extraBody === 'object' ? opts.extraBody : {}),
         model,
         max_tokens: maxTokens,
         messages: [{ role: 'user', content: prompt }],

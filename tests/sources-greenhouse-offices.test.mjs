@@ -35,7 +35,7 @@ test('contentToText: decodes double-encoded HTML to plain text, strips script/st
   assert.equal(text, 'Build & ship backend services.');
   assert.equal(contentToText(''), '');
   assert.equal(contentToText(null), '');
-  assert.equal(contentToText('&lt;p&gt;' + 'x'.repeat(5000) + '&lt;/p&gt;').length, 4000); // DESCRIPTION_CAP
+  assert.equal(contentToText('&lt;p&gt;' + 'x'.repeat(25000) + '&lt;/p&gt;').length, 20000); // DESCRIPTION_CAP
 });
 
 test('fetchGreenhouse: requests content=true and populates description', async () => {

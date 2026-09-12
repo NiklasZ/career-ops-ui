@@ -265,7 +265,7 @@ export async function runRuScan(opts = {}) {
   // v1.76.0 — compile negatives once (word-boundary acronyms + guard).
   const negativeMatchers = compileKeywordList(cfg.negative);
   const filteredRaw = flat.filter((j) => passesNegative(j.title, negativeMatchers)
-    && locOk(j.location)
+    && locOk(j.location, j.url, j.title)
     && tierOk(j.title)
     && contentOk(j.description ?? j.snippet));
   let filtered = applyBoostStamps(filteredRaw, cfg.boosts);

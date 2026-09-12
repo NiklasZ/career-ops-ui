@@ -77,24 +77,30 @@ export function providerAvailable() {
  *                                            returns the copy-paste prompt)
  *   { mode: 'too-large', size, cap }       — prompt exceeds the soft cap
  */
-export async function runActiveProvider(fullPrompt, { sizeCap = PROMPT_SIZE_SOFT_CAP } = {}) {
+export async function runActiveProvider(fullPrompt, { sizeCap = PROMPT_SIZE_SOFT_CAP, maxTokens, extraBody } = {}) {
   if (typeof fullPrompt !== 'string' || !fullPrompt) return { mode: 'manual' };
   if (fullPrompt.length > sizeCap) return { mode: 'too-large', size: fullPrompt.length, cap: sizeCap };
 
+  // Forward optional per-call provider options (output budget, provider-specific
+  // extras). Runners accept `(prompt, opts)` and ignore what they don't use.
+  const runnerOpts = {};
+  if (Number.isFinite(maxTokens)) runnerOpts.maxTokens = maxTokens;
+  if (extraBody && typeof extraBody === 'object') runnerOpts.extraBody = extraBody;
+
   const g = gate();
   if (g.wantAnthropic && hasAnthropicKey()) {
-    const r = await runAnthropic(fullPrompt);
+    const r = await runAnthropic(fullPrompt, runnerOpts);
     if (!r.error) recordUsage('anthropic', r.usage);
     return r.error ? { mode: 'anthropic', error: r.error } : { mode: 'anthropic', markdown: r.markdown, usage: r.usage };
   }
   if (g.wantGemini && hasGeminiKey()) {
-    const r = await runGemini(fullPrompt);
+    const r = await runGemini(fullPrompt, runnerOpts);
     if (!r.error) recordUsage('gemini', r.usage);
     return r.error ? { mode: 'gemini', error: r.error } : { mode: 'gemini', markdown: r.markdown, usage: r.usage };
   }
   const tp = tailProvider(g);
   if (tp) {
-    const r = await tp.run(fullPrompt);
+    const r = await tp.run(fullPrompt, runnerOpts);
     if (!r.error) recordUsage(tp.mode, r.usage);
     return r.error ? { mode: tp.mode, error: r.error } : { mode: tp.mode, markdown: r.markdown, usage: r.usage };
   }

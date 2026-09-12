@@ -10,6 +10,7 @@
  * Factory: `window.createScanFilters(refs, deps)`
  *   refs = { filterText, filterExclude, filterRemote, filterSalaryMin, filterSalaryMax,
  *            filterSource, filterCountry, filterSeniority, filterScope, filterAge, favOnly,
+ *            filterEligible,
  *            activeTech, activeLevel, activeDynamic }
  *   deps = { pager, SR }
  *   → { applyFilters, resetFilters, getFilterState, setFilterState }
@@ -19,6 +20,7 @@
     const {
       filterText, filterExclude, filterRemote, filterSalaryMin, filterSalaryMax,
       filterSource, filterCountry, filterSeniority, filterScope, filterAge, favOnly,
+      filterEligible,
       activeTech, activeLevel, activeDynamic,
     } = refs;
     const { pager, SR } = deps;
@@ -37,6 +39,7 @@
       filterSeniority.value = '';
       filterScope.value = 'all';
       filterAge.value = '';
+      filterEligible.value = '';
       favOnly.checked = false;
       activeTech.clear(); activeLevel.clear(); activeDynamic.clear();
       applyFilters();
@@ -49,6 +52,7 @@
         source: filterSource.value, country: filterCountry.value,
         seniority: filterSeniority.value,
         scope: filterScope.value, age: filterAge.value, favOnly: favOnly.checked,
+        eligible: filterEligible.value,
         tech: [...activeTech], level: [...activeLevel], dynamic: [...activeDynamic],
       };
     }
@@ -64,6 +68,7 @@
       filterSeniority.value = s.seniority || '';
       filterScope.value = s.scope || 'all';
       filterAge.value = s.age || '';
+      filterEligible.value = s.eligible || '';
       favOnly.checked = !!s.favOnly;
       activeTech.clear(); (Array.isArray(s.tech) ? s.tech : []).forEach((x) => activeTech.add(x));
       activeLevel.clear(); (Array.isArray(s.level) ? s.level : []).forEach((x) => activeLevel.add(x));

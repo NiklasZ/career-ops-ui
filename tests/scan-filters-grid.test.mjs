@@ -44,6 +44,6 @@ test('scan.js drops the old hidden-label alignment hack in the actions row', () 
   // flex wrapper; the buttons are now direct children of .scan-filters__actions.
   assert.doesNotMatch(scanJs, /scan-filters__actions[\s\S]{0,120}visibility:\s*'hidden'/,
     'no hidden placeholder label left inside the actions row');
-  assert.match(scanJs, /className:\s*'scan-filters__actions'\s*\}\s*,\s*\[applyBtn,\s*resetBtn\]/,
-    'actions row holds applyBtn + resetBtn directly');
+  assert.match(scanJs, /className:\s*'scan-filters__actions'\s*\}\s*,\s*\[refineBtn,\s*applyBtn,\s*resetBtn\]/,
+    'actions row holds refineBtn + applyBtn + resetBtn directly');
 });

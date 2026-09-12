@@ -2,7 +2,20 @@
  * Lever public postings API.
  *   GET https://api.lever.co/v0/postings/<slug>
  */
+import { decodeEntities } from '../html-entities.mjs';
+
 const UA = 'career-ops-web-ui/1.0';
+
+// Lever's list response embeds each posting body (`description` HTML /
+// `descriptionPlain`); map it to `description` so the eligibility judge reads
+// the real JD instead of an empty field.
+const DESCRIPTION_CAP = 20000;
+
+function bodyToText(html) {
+  if (typeof html !== 'string' || !html) return '';
+  return decodeEntities(html.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ').trim().slice(0, DESCRIPTION_CAP);
+}
 
 // v1.69.0 (P-14) — self-describing adapter metadata; see ashby.mjs for the rationale.
 export const meta = {
@@ -54,6 +67,8 @@ function normalize(j) {
     relocates: false,
     date: j.createdAt ? new Date(j.createdAt).toISOString() : '',
     snippet: cats.team || cats.department || '',
+    description: (typeof j.descriptionPlain === 'string' ? j.descriptionPlain.replace(/\s+/g, ' ').trim().slice(0, DESCRIPTION_CAP) : '')
+      || bodyToText(j.description),
     source: 'lever',
   };
 }

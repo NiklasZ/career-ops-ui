@@ -2,7 +2,20 @@
  * Ashby public posting-api wrapper.
  *   GET https://api.ashbyhq.com/posting-api/job-board/<slug>?includeCompensation=true
  */
+import { decodeEntities } from '../html-entities.mjs';
+
 const UA = 'career-ops-web-ui/1.0';
+
+// The posting-api list response already embeds each posting's body as
+// `descriptionHtml` / `descriptionPlain`; we map it to `description` so the
+// eligibility judge reads the real JD (previously dropped, leaving 0 chars).
+const DESCRIPTION_CAP = 20000;
+
+function bodyToText(html) {
+  if (typeof html !== 'string' || !html) return '';
+  const noMedia = html.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+  return decodeEntities(noMedia.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim().slice(0, DESCRIPTION_CAP);
+}
 
 // v1.69.0 (P-14) — self-describing adapter metadata. The registry
 // auto-discovers every `*.mjs` in this folder and collects each
@@ -95,6 +108,8 @@ function normalize(j) {
     relocates: false,
     date: j.publishedAt || '',
     snippet: '',
+    description: bodyToText(j.descriptionHtml)
+      || (typeof j.descriptionPlain === 'string' ? j.descriptionPlain.replace(/\s+/g, ' ').trim().slice(0, DESCRIPTION_CAP) : ''),
     source: 'ashby',
   };
 }

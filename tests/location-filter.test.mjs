@@ -71,3 +71,65 @@ test('exact parity worked-example from parent portals.example.yml', () => {
   assert.equal(f('Toronto, Canada'), false); // not blocked, but not in allow
   assert.equal(f(''), true);                  // missing → pass
 });
+
+// ── Parent-parity 4-tier semantics (#next / port) ───────────────────
+
+test('always_allow rescues a posting that ALSO lists a blocked city', () => {
+  const f = buildLocationFilter({
+    always_allow: ['Zürich', 'Zurich', 'Switzerland'],
+    allow: ['Remote'],
+    block: ['US', 'New York', 'San Francisco'],
+  });
+  // The user's exact concern: on-site in New York AND Zürich → keep.
+  assert.equal(f('New York City, NY | Zürich, Switzerland'), true);
+  assert.equal(f('San Francisco, CA; Zürich, Switzerland'), true);
+  assert.equal(f('Zürich, CH'), true);
+});
+
+test('word boundaries: short codes do not fire inside longer words', () => {
+  const f = buildLocationFilter({ allow: ['Remote', 'Switzerland'], block: ['US', 'USA', 'India'] });
+  assert.equal(f('Remote'), true);
+  assert.equal(f('Remote - US'), false);       // "US" word → blocked
+  assert.equal(f('USA | Remote'), false);
+  assert.equal(f('Remote, India'), false);
+  // "US" as a substring must NOT fire here — Lausanne is Swiss, and matches allow.
+  assert.equal(f('Lausanne, Switzerland'), true);
+});
+
+test('allow non-empty gates that have no blocked term still need an allow keyword', () => {
+  const f = buildLocationFilter({ allow: ['Remote'], block: ['US', 'New York'] });
+  assert.equal(f('Remote, London, UK'), true);
+  assert.equal(f('Berlin, Germany · Remote'), true);
+  assert.equal(f('Berlin, Germany'), false); // remote missing from location
+});
+
+test('block_hard (optional tier) cannot be overridden by always_allow', () => {
+  const f = buildLocationFilter({
+    always_allow: ['Porto'],
+    allow: ['Remote'],
+    block_hard: ['Brazil'],
+  });
+  assert.equal(f('Porto Alegre, Rio Grande do Sul, Brazil'), false);
+  assert.equal(f('Porto, Portugal'), true);
+});
+
+test('last-resort title rescue: remote in the TITLE passes an allow-gated location', () => {
+  const f = buildLocationFilter({ allow: ['Remote'], block: ['Brazil'] });
+  assert.equal(f('Las Vegas, Nevada', undefined, 'Program Manager - Remote'), true);
+  assert.equal(f('Bengaluru, India', undefined, 'Program Manager - Remote'), true); // no block term
+  // ...but a blocked location never gets rescued by the title.
+  const g = buildLocationFilter({ allow: ['Remote'], block: ['New York'] });
+  assert.equal(g('New York, NY', undefined, 'Program Manager - Remote'), false);
+});
+
+test('workday-style rolled-up locations fall back to the /job/{location}/ URL hint', () => {
+  const f = buildLocationFilter({ allow: ['Remote', 'Switzerland'], block: ['India'] });
+  assert.equal(
+    f('5 Locations', 'https://wd2.myworkdayjobs.com/Acme/job/Hyderabad-Telangana-India/Software-Engineer'),
+    false,
+  );
+  assert.equal(
+    f('5 Locations', 'https://wd2.myworkdayjobs.com/Acme/job/Zurich-Switzerland/Software-Engineer'),
+    true,
+  );
+});

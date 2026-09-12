@@ -8,16 +8,25 @@
  *
  * portals.yml:
  *   location_filter:
- *     allow: ["Remote", "United States", "Atlanta"]
- *     block: ["India", "London", "Germany"]
+ *     always_allow: ["Zürich", "Switzerland"]
+ *     allow:        ["Remote"]
+ *     block:        ["US", "USA", "New York"]
+ *     block_hard:   ["Brazil"]   # optional; always_allow cannot override it
  *
- * Semantics (verbatim from parent scan.mjs):
+ * Semantics (verbatim from parent scan.mjs — this is the full 4-tier filter,
+ * not the old allow/block-only subset):
  *   - No `location_filter` key            → everything passes.
  *   - Empty/missing location on a job     → pass (don't penalize missing data).
- *   - `block` match                       → reject (takes precedence over allow).
+ *   - Keywords match on WORD BOUNDARIES   → "US" cannot fire inside "Lausanne".
+ *   - `block_hard` match                  → reject (the ONLY tier always_allow
+ *     cannot override — for country-level terms that are never a false reject).
+ *   - `always_allow` match                → pass (checked before `block`, so a
+ *     posting listing Zürich + New York survives; "on-site in NY and Zürich").
+ *   - `block` match                       → reject.
  *   - `allow` empty                       → pass (already cleared block).
  *   - `allow` non-empty                   → must match ≥ 1 keyword.
- *   - All matches: case-insensitive substring.
+ *   - Last resort: the posting's TITLE marking it remote ("Program Manager -
+ *     Remote") can widen `allow`, never `block`.
  */
 
 // ── Title filter ────────────────────────────────────────────────────
@@ -108,22 +117,112 @@ export function buildTitleFilter(titleFilter) {
 }
 
 /**
- * @param {{allow?: string[], block?: string[]}|null|undefined} locationFilter
- * @returns {(location: string) => boolean} predicate — true = keep the job
+ * Compile a location keyword into a word-boundary matcher.
+ *
+ * Unlike `compileKeyword` (title filter), location keywords ALWAYS require
+ * word boundaries on both ends — a short country code like "US" must never
+ * fire inside "Lausanne" or "Brussels". Word (here: contiguous alphanumeric
+ * run) delimiters are any non-alphanumeric char or string end.
+ *
+ * Ported from parent scan.mjs `compileLocationKeyword` (#2087 word boundaries).
+ * @param {string} keyword already-lowercased keyword
+ * @returns {(lower: string) => boolean}
+ */
+export function compileLocationKeyword(keyword) {
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const startsWord = /[a-z0-9]/.test(keyword[0]);
+  const endsWord = /[a-z0-9]/.test(keyword[keyword.length - 1]);
+  const prefix = startsWord ? '(?<![a-z0-9])' : '';
+  const suffix = endsWord ? '(?![a-z0-9])' : '';
+  const re = new RegExp(`${prefix}${escaped}${suffix}`);
+  return (lower) => re.test(lower);
+}
+
+function compileLocationKeywordList(value) {
+  return (Array.isArray(value) ? value : [])
+    .filter((k) => typeof k === 'string')
+    .map((k) => k.trim().toLowerCase())
+    .filter((k) => k.length > 0)
+    .map(compileLocationKeyword);
+}
+
+/**
+ * Some providers report a rolled-up display string ("5 Locations", "2
+ * Locations") while the canonical URL still names the real primary location.
+ * Workday is the common case: .../job/Hyderabad-Telangana-India/ shows
+ * up as "5 Locations", so no `block` keyword can ever match the location
+ * field. Recover that signal by reading the path segment right after
+ * `/job/`. Ported from parent scan.mjs `locationHintFromUrl`.
+ */
+function locationHintFromUrl(url) {
+  if (typeof url !== 'string' || url.trim() === '') return '';
+  let pathname;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return '';
+  }
+  const segments = pathname.split('/').filter(Boolean);
+  const jobIdx = segments.lastIndexOf('job');
+  if (jobIdx === -1 || jobIdx === segments.length - 1) return '';
+  let segment = segments[jobIdx + 1];
+  try {
+    segment = decodeURIComponent(segment);
+  } catch {
+    /* malformed percent-encoding — fall back to raw segment */
+  }
+  return segment.replace(/[-_+]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * A posting's TITLE can state the remoteness when the location field only has
+ * the hiring office ("Program Manager - Remote" → "Las Vegas, Nevada"). Only an
+ * unambiguous work-arrangement marker counts — "remote" followed by end-of-
+ * string, a non-letter, or " in …", and not negated ("Non-Remote"). Ported
+ * from parent scan.mjs (REMOTE_TITLE_RE / REMOTE_NEGATED_RE).
+ */
+const REMOTE_TITLE_RE = /(?<![a-z])remote(?=$|\s*[^a-z\s]|\s+in\b)/;
+const REMOTE_NEGATED_RE = /\b(?:non|not|no)[^a-z]*remote/;
+
+function titleSignalsRemote(title) {
+  if (typeof title !== 'string' || title.trim() === '') return false;
+  const lower = title.toLowerCase();
+  if (REMOTE_NEGATED_RE.test(lower)) return false;
+  return REMOTE_TITLE_RE.test(lower);
+}
+
+/**
+ * Build the full 4-tier location predicate from `portals.yml::location_filter`.
+ *
+ * Signature mirrors parent scan.mjs: `(location, url?, title?) => boolean`.
+ * `url` feeds the Workday `/job/{location}/` hint; `title` is the last-resort
+ * "remote-in-title" rescue. Callers passing only `location` get the same
+ * behaviour the parent's unit tests exercise.
+ *
+ * @param {{always_allow?: string[], allow?: string[], block?: string[], block_hard?: string[]}|null|undefined} locationFilter
+ * @returns {(location: string, url?: string, title?: string) => boolean} true = keep
  */
 export function buildLocationFilter(locationFilter) {
   if (!locationFilter || typeof locationFilter !== 'object') return () => true;
-  const allow = (Array.isArray(locationFilter.allow) ? locationFilter.allow : [])
-    .map((k) => String(k).toLowerCase());
-  const block = (Array.isArray(locationFilter.block) ? locationFilter.block : [])
-    .map((k) => String(k).toLowerCase());
+  const alwaysAllow = compileLocationKeywordList(locationFilter.always_allow);
+  const allow = compileLocationKeywordList(locationFilter.allow);
+  const block = compileLocationKeywordList(locationFilter.block);
+  const blockHard = compileLocationKeywordList(locationFilter.block_hard);
 
-  return (location) => {
-    if (!location) return true;
-    const lower = String(location).toLowerCase();
-    if (block.length > 0 && block.some((k) => lower.includes(k))) return false;
+  return (location, url, title) => {
+    const lower = typeof location === 'string' ? location.trim().toLowerCase() : '';
+    const hint = locationHintFromUrl(url);
+    // Nothing to judge on either field → pass (don't penalize missing data).
+    if (lower === '' && hint === '') return true;
+    const matches = (m) => (lower !== '' && m(lower)) || (hint !== '' && m(hint));
+    if (blockHard.length > 0 && blockHard.some(matches)) return false;
+    if (alwaysAllow.length > 0 && alwaysAllow.some(matches)) return true;
+    if (block.length > 0 && block.some(matches)) return false;
     if (allow.length === 0) return true;
-    return allow.some((k) => lower.includes(k));
+    if (allow.some(matches)) return true;
+    // Last resort only. Deliberately placed AFTER `block` so a remote title can
+    // never rescue a blocked location. This widens `allow`, never `block`.
+    return titleSignalsRemote(title);
   };
 }
 

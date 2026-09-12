@@ -94,6 +94,10 @@ export const PATHS = {
   // reads it live instead of hardcoding a status whitelist (see
   // server/lib/states.mjs). A hardcoded fallback covers CI isolation.
   statesYml: path('templates', 'states.yml'),
+  // v1.157.0+ — per-URL Location-eligibility verdicts from the #/scan refine
+  // pass (server/lib/location-eligibility.mjs). User layer: cache only, the
+  // scan results themselves are never rewritten by it.
+  eligibilityCache: path('data', 'eligibility.json'),
   packageJson: path('package.json'),
   version: path('VERSION'),
   envFile: path('.env'),
